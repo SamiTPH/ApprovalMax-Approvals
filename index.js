@@ -1,14 +1,51 @@
 require("dotenv").config();
 const axios = require("axios");
+const { Pool } = require("pg");
 
 // ==============================
-// 🔐 REFRESH APPROVALMAX TOKEN
+// 🗄️ DATABASE CONNECTION
+// ==============================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
+
+// ==============================
+// 📥 GET STORED TOKENS
+// ==============================
+async function getStoredTokens() {
+  const res = await pool.query("SELECT * FROM tokens LIMIT 1");
+  return res.rows[0];
+}
+
+// ==============================
+// 💾 SAVE TOKENS
+// ==============================
+async function saveTokens(access_token, refresh_token) {
+  await pool.query(
+    `
+    UPDATE tokens
+    SET access_token = $1,
+        refresh_token = $2,
+        updated_at = NOW()
+    WHERE id = 1
+  `,
+    [access_token, refresh_token]
+  );
+}
+
+// ==============================
+// 🔄 REFRESH APPROVALMAX TOKEN
 // ==============================
 async function refreshApprovalMaxToken() {
   try {
+    const stored = await getStoredTokens();
+
     const params = new URLSearchParams();
     params.append("grant_type", "refresh_token");
-    params.append("refresh_token", process.env.REFRESH_TOKEN);
+    params.append("refresh_token", stored.refresh_token);
     params.append("client_id", process.env.APPROVALMAX_CLIENT_ID);
     params.append("client_secret", process.env.APPROVALMAX_CLIENT_SECRET);
 
@@ -19,16 +56,15 @@ async function refreshApprovalMaxToken() {
 
     const { access_token, refresh_token } = res.data;
 
-    console.log("🔄 ApprovalMax token refreshed");
+    console.log("🔄 Token refreshed");
 
-    // ✅ Keep in memory ONLY (Railway-safe)
-    process.env.ACCESS_TOKEN = access_token;
-    process.env.REFRESH_TOKEN = refresh_token;
+    // ✅ Save new tokens (CRITICAL)
+    await saveTokens(access_token, refresh_token);
 
     return access_token;
 
   } catch (err) {
-    console.error("❌ Token refresh failed:", err.response?.data || err.message);
+    console.error("❌ Refresh failed:", err.response?.data || err.message);
     throw err;
   }
 }
@@ -37,14 +73,16 @@ async function refreshApprovalMaxToken() {
 // 📥 FETCH APPROVALS
 // ==============================
 async function fetchApprovals() {
+  const stored = await getStoredTokens();
+
   try {
     const res = await axios.get(
       `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents`,
       {
         headers: {
-          Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
-          Accept: "application/json"
-        }
+          Authorization: `Bearer ${stored.access_token}`,
+          Accept: "application/json",
+        },
       }
     );
 
@@ -60,8 +98,8 @@ async function fetchApprovals() {
         {
           headers: {
             Authorization: `Bearer ${newToken}`,
-            Accept: "application/json"
-          }
+            Accept: "application/json",
+          },
         }
       );
 
@@ -93,7 +131,7 @@ function getDepartment(doc) {
   const fields = doc.additionalInformation || [];
 
   const dept = fields.find(
-    f => f.additionalFieldName === "Department"
+    (f) => f.additionalFieldName === "Department"
   );
 
   return dept?.value || null;
@@ -112,7 +150,7 @@ function formatRow(doc) {
     getDepartment(doc) || "",
     doc.createdAt || "",
     doc.modifiedAt || "",
-    doc.decisionDate || ""
+    doc.decisionDate || "",
   ];
 }
 
@@ -142,7 +180,7 @@ async function getExcelRows(token) {
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows`;
 
   const res = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` }
+    headers: { Authorization: `Bearer ${token}` },
   });
 
   return res.data.value || [];
@@ -154,7 +192,7 @@ async function getExcelRows(token) {
 function buildMap(rows) {
   const map = {};
 
-  rows.forEach(row => {
+  rows.forEach((row) => {
     const values = row.values[0];
     map[values[0]] = values;
   });
@@ -168,7 +206,7 @@ function buildMap(rows) {
 function prepareRows(apiData, excelMap) {
   const rowsToInsert = [];
 
-  apiData.forEach(doc => {
+  apiData.forEach((doc) => {
     const dept = getDepartment(doc);
 
     if (dept !== "Sales & Pre-Sales") return;
@@ -198,12 +236,16 @@ async function addRows(token, rows) {
   const url =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows/add`;
 
-  await axios.post(url, { values: rows }, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
+  await axios.post(
+    url,
+    { values: rows },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
     }
-  });
+  );
 
   console.log(`✅ Added ${rows.length} rows`);
 }
