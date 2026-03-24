@@ -50,23 +50,25 @@ async function refreshToken() {
 }
 
 // ==============================
-// FETCH ALL DOCUMENTS (WITH PAGINATION LOGGING)
+// FETCH ALL DOCUMENTS (CORRECT PAGINATION)
 // ==============================
 async function fetchAllDocuments() {
   const stored = await getStoredTokens();
   let token = stored.access_token;
 
   let allDocs = [];
-  let page = 1;
+  let skip = 0;
+  const limit = 100;
+  let safetyCounter = 0;
 
-  console.log("🚀 Starting pagination fetch...");
+  console.log("🚀 Starting pagination (top/skip)...");
 
   while (true) {
     try {
-      console.log(`➡️ Fetching page ${page}...`);
+      console.log(`➡️ Fetching: skip=${skip}, top=${limit}`);
 
       const res = await axios.get(
-        `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?page=${page}`,
+        `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?top=${limit}&skip=${skip}`,
         {
           headers: { Authorization: `Bearer ${token}` }
         }
@@ -74,19 +76,34 @@ async function fetchAllDocuments() {
 
       const data = res.data.payload || [];
 
-      console.log(`📄 Page ${page} returned ${data.length} records`);
+      console.log(`📄 Received ${data.length} records`);
 
+      // STOP CONDITION 1: no data
       if (data.length === 0) {
-        console.log("🛑 No more data, stopping pagination");
+        console.log("🛑 No more data");
         break;
       }
 
       allDocs.push(...data);
-      page++;
+
+      // STOP CONDITION 2: last page
+      if (data.length < limit) {
+        console.log("🛑 Last page reached");
+        break;
+      }
+
+      skip += limit;
+      safetyCounter++;
+
+      // STOP CONDITION 3: safety limit
+      if (safetyCounter > 100) {
+        console.log("⚠️ Safety break triggered (too many pages)");
+        break;
+      }
 
     } catch (err) {
       if (err.response?.status === 401) {
-        console.log("⚠️ Token expired during pagination → refreshing...");
+        console.log("⚠️ Token expired → refreshing...");
         token = await refreshToken();
         continue;
       }
@@ -115,7 +132,7 @@ async function fetchUsers(token) {
 
   const users = res.data.payload || [];
 
-  console.log(`👥 Total users fetched: ${users.length}`);
+  console.log(`👥 Users fetched: ${users.length}`);
 
   const map = {};
   users.forEach(u => {
@@ -134,10 +151,9 @@ function cleanHTML(text) {
 }
 
 function getDepartment(doc) {
-  const field = doc.additionalInformation?.find(
+  return doc.additionalInformation?.find(
     f => f.additionalFieldName === "Department"
-  );
-  return field?.value;
+  )?.value;
 }
 
 function getRequester(doc, userMap) {
@@ -187,7 +203,7 @@ async function clearExcel(token) {
 
   const rows = res.data.value;
 
-  console.log(`🗑️ Deleting ${rows.length} existing rows`);
+  console.log(`🗑️ Deleting ${rows.length} rows`);
 
   for (let i = rows.length - 1; i >= 0; i--) {
     await axios.delete(`${url}/${i}`, {
@@ -234,7 +250,7 @@ async function main() {
 
     const salesDocs = docs.filter(d => getDepartment(d) === "Sales & Pre-Sales");
 
-    console.log(`📊 Sales & Pre-Sales records: ${salesDocs.length}`);
+    console.log(`📊 Sales records: ${salesDocs.length}`);
 
     const rows = salesDocs.map(doc => [
       doc.requestId,
