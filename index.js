@@ -50,96 +50,77 @@ async function refreshToken() {
 }
 
 // ==============================
-// FETCH ALL DOCUMENTS (CORRECT PAGINATION)
+// FETCH DOCUMENTS (DATE FILTER)
 // ==============================
-async function fetchAllDocuments() {
-  const stored = await getStoredTokens();
-  let token = stored.access_token;
+async function fetchDocuments() {
+  let token = (await getStoredTokens()).access_token;
 
-  let allDocs = [];
-  let skip = 0;
-  const limit = 100;
-  let safetyCounter = 0;
+  try {
+    console.log("📅 Fetching last 90 days of documents...");
 
-  console.log("🚀 Starting pagination (top/skip)...");
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 90);
 
-  while (true) {
-    try {
-      console.log(`➡️ Fetching: skip=${skip}, top=${limit}`);
-
-      const res = await axios.get(
-        `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?top=${limit}&skip=${skip}`,
-        {
-          headers: { Authorization: `Bearer ${token}` }
-        }
-      );
-
-      const data = res.data.payload || [];
-
-      console.log(`📄 Received ${data.length} records`);
-
-      // STOP CONDITION 1: no data
-      if (data.length === 0) {
-        console.log("🛑 No more data");
-        break;
+    const res = await axios.get(
+      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?createdFrom=${fromDate.toISOString()}`,
+      {
+        headers: { Authorization: `Bearer ${token}` }
       }
+    );
 
-      allDocs.push(...data);
+    const docs = res.data.payload || [];
 
-      // STOP CONDITION 2: last page
-      if (data.length < limit) {
-        console.log("🛑 Last page reached");
-        break;
-      }
+    console.log(`📄 Documents fetched: ${docs.length}`);
 
-      skip += limit;
-      safetyCounter++;
+    return docs;
 
-      // STOP CONDITION 3: safety limit
-      if (safetyCounter > 100) {
-        console.log("⚠️ Safety break triggered (too many pages)");
-        break;
-      }
-
-    } catch (err) {
-      if (err.response?.status === 401) {
-        console.log("⚠️ Token expired → refreshing...");
-        token = await refreshToken();
-        continue;
-      }
-
-      throw err;
+  } catch (err) {
+    if (err.response?.status === 401) {
+      console.log("⚠️ Token expired → refreshing...");
+      await refreshToken();
+      return fetchDocuments();
     }
+
+    throw err;
   }
-
-  console.log(`✅ Total documents fetched: ${allDocs.length}`);
-
-  return allDocs;
 }
 
 // ==============================
-// FETCH USERS
+// FETCH USERS (WITH RETRY)
 // ==============================
-async function fetchUsers(token) {
-  console.log("👤 Fetching users...");
+async function fetchUsers() {
+  let token = (await getStoredTokens()).access_token;
 
-  const res = await axios.get(
-    `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/userProfiles`,
-    {
-      headers: { Authorization: `Bearer ${token}` }
+  try {
+    console.log("👤 Fetching users...");
+
+    const res = await axios.get(
+      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/userProfiles`,
+      {
+        headers: { Authorization: `Bearer ${token}` }
+      }
+    );
+
+    const users = res.data.payload || [];
+
+    console.log(`👥 Users fetched: ${users.length}`);
+
+    const map = {};
+    users.forEach(u => {
+      map[u.userId] = `${u.firstName} ${u.lastName}`;
+    });
+
+    return map;
+
+  } catch (err) {
+    if (err.response?.status === 401) {
+      console.log("⚠️ Token expired (users) → refreshing...");
+      await refreshToken();
+      return fetchUsers();
     }
-  );
 
-  const users = res.data.payload || [];
-
-  console.log(`👥 Users fetched: ${users.length}`);
-
-  const map = {};
-  users.forEach(u => {
-    map[u.userId] = `${u.firstName} ${u.lastName}`;
-  });
-
-  return map;
+    throw err;
+  }
 }
 
 // ==============================
@@ -169,7 +150,7 @@ function getComments(doc, userMap) {
 }
 
 // ==============================
-// GRAPH
+// GRAPH TOKEN
 // ==============================
 async function getGraphToken() {
   console.log("🔐 Getting Graph token...");
@@ -189,27 +170,20 @@ async function getGraphToken() {
 }
 
 // ==============================
-// CLEAR EXCEL
+// CLEAR EXCEL (CORRECT METHOD)
 // ==============================
 async function clearExcel(token) {
-  console.log("🧹 Clearing Excel...");
+  console.log("🧹 Clearing Excel (range.clear)...");
 
   const url =
-    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows`;
+    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/range/clear`;
 
-  const res = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` }
+  await axios.post(url, {}, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    }
   });
-
-  const rows = res.data.value;
-
-  console.log(`🗑️ Deleting ${rows.length} rows`);
-
-  for (let i = rows.length - 1; i >= 0; i--) {
-    await axios.delete(`${url}/${i}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-  }
 
   console.log("✅ Excel cleared");
 }
@@ -243,12 +217,12 @@ async function main() {
   try {
     console.log("🚀 Starting sync...");
 
-    const docs = await fetchAllDocuments();
+    const docs = await fetchDocuments();
+    const userMap = await fetchUsers();
 
-    const stored = await getStoredTokens();
-    const userMap = await fetchUsers(stored.access_token);
-
-    const salesDocs = docs.filter(d => getDepartment(d) === "Sales & Pre-Sales");
+    const salesDocs = docs.filter(
+      d => getDepartment(d) === "Sales & Pre-Sales"
+    );
 
     console.log(`📊 Sales records: ${salesDocs.length}`);
 
