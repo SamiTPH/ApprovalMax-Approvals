@@ -3,161 +3,161 @@ const axios = require("axios");
 const { Pool } = require("pg");
 
 // ==============================
-// 🗄️ DATABASE CONNECTION
+// DB
 // ==============================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: { rejectUnauthorized: false }
 });
 
 // ==============================
-// 📥 GET STORED TOKENS
+// TOKEN HANDLING
 // ==============================
 async function getStoredTokens() {
   const res = await pool.query("SELECT * FROM tokens LIMIT 1");
   return res.rows[0];
 }
 
-// ==============================
-// 💾 SAVE TOKENS
-// ==============================
 async function saveTokens(access_token, refresh_token) {
-  await pool.query(
-    `
+  await pool.query(`
     UPDATE tokens
-    SET access_token = $1,
-        refresh_token = $2,
-        updated_at = NOW()
-    WHERE id = 1
-  `,
-    [access_token, refresh_token]
-  );
+    SET access_token=$1, refresh_token=$2, updated_at=NOW()
+    WHERE id = (SELECT id FROM tokens LIMIT 1)
+  `, [access_token, refresh_token]);
 }
 
-// ==============================
-// 🔄 REFRESH APPROVALMAX TOKEN
-// ==============================
-async function refreshApprovalMaxToken() {
-  try {
-    const stored = await getStoredTokens();
-
-    const params = new URLSearchParams();
-    params.append("grant_type", "refresh_token");
-    params.append("refresh_token", stored.refresh_token);
-    params.append("client_id", process.env.APPROVALMAX_CLIENT_ID);
-    params.append("client_secret", process.env.APPROVALMAX_CLIENT_SECRET);
-
-    const res = await axios.post(
-      "https://identity.approvalmax.com/connect/token",
-      params
-    );
-
-    const { access_token, refresh_token } = res.data;
-
-    console.log("🔄 Token refreshed");
-
-    // ✅ Save new tokens (CRITICAL)
-    await saveTokens(access_token, refresh_token);
-
-    return access_token;
-
-  } catch (err) {
-    console.error("❌ Refresh failed:", err.response?.data || err.message);
-    throw err;
-  }
-}
-
-// ==============================
-// 📥 FETCH APPROVALS
-// ==============================
-async function fetchApprovals() {
+async function refreshToken() {
   const stored = await getStoredTokens();
 
-  try {
-    const res = await axios.get(
-      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents`,
-      {
-        headers: {
-          Authorization: `Bearer ${stored.access_token}`,
-          Accept: "application/json",
-        },
-      }
-    );
+  const params = new URLSearchParams();
+  params.append("grant_type", "refresh_token");
+  params.append("refresh_token", stored.refresh_token);
+  params.append("client_id", process.env.APPROVALMAX_CLIENT_ID);
+  params.append("client_secret", process.env.APPROVALMAX_CLIENT_SECRET);
 
-    return res.data.payload || [];
+  const res = await axios.post(
+    "https://identity.approvalmax.com/connect/token",
+    params
+  );
 
-  } catch (err) {
-    if (err.response?.status === 401) {
-      console.log("⚠️ Token expired → refreshing...");
-      const newToken = await refreshApprovalMaxToken();
+  const { access_token, refresh_token } = res.data;
 
-      const retry = await axios.get(
-        `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents`,
+  console.log("🔄 Token refreshed");
+
+  await saveTokens(access_token, refresh_token);
+
+  return access_token;
+}
+
+// ==============================
+// FETCH ALL DOCUMENTS (WITH PAGINATION LOGGING)
+// ==============================
+async function fetchAllDocuments() {
+  const stored = await getStoredTokens();
+  let token = stored.access_token;
+
+  let allDocs = [];
+  let page = 1;
+
+  console.log("🚀 Starting pagination fetch...");
+
+  while (true) {
+    try {
+      console.log(`➡️ Fetching page ${page}...`);
+
+      const res = await axios.get(
+        `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?page=${page}`,
         {
-          headers: {
-            Authorization: `Bearer ${newToken}`,
-            Accept: "application/json",
-          },
+          headers: { Authorization: `Bearer ${token}` }
         }
       );
 
-      return retry.data.payload || [];
+      const data = res.data.payload || [];
+
+      console.log(`📄 Page ${page} returned ${data.length} records`);
+
+      if (data.length === 0) {
+        console.log("🛑 No more data, stopping pagination");
+        break;
+      }
+
+      allDocs.push(...data);
+      page++;
+
+    } catch (err) {
+      if (err.response?.status === 401) {
+        console.log("⚠️ Token expired during pagination → refreshing...");
+        token = await refreshToken();
+        continue;
+      }
+
+      throw err;
     }
-
-    throw err;
   }
+
+  console.log(`✅ Total documents fetched: ${allDocs.length}`);
+
+  return allDocs;
 }
 
 // ==============================
-// 🧠 CLEAN DESCRIPTION
+// FETCH USERS
 // ==============================
-function cleanDescription(html) {
-  if (!html) return "";
+async function fetchUsers(token) {
+  console.log("👤 Fetching users...");
 
-  return html
-    .replace(/<\/p>/g, "\n")
-    .replace(/<br\s*\/?>/g, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/\n+/g, "\n")
-    .trim();
-}
-
-// ==============================
-// 🧠 GET DEPARTMENT
-// ==============================
-function getDepartment(doc) {
-  const fields = doc.additionalInformation || [];
-
-  const dept = fields.find(
-    (f) => f.additionalFieldName === "Department"
+  const res = await axios.get(
+    `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/userProfiles`,
+    {
+      headers: { Authorization: `Bearer ${token}` }
+    }
   );
 
-  return dept?.value || null;
+  const users = res.data.payload || [];
+
+  console.log(`👥 Total users fetched: ${users.length}`);
+
+  const map = {};
+  users.forEach(u => {
+    map[u.userId] = `${u.firstName} ${u.lastName}`;
+  });
+
+  return map;
 }
 
 // ==============================
-// 📊 FORMAT ROW
+// HELPERS
 // ==============================
-function formatRow(doc) {
-  return [
-    doc.requestId,
-    doc.documentName || "",
-    cleanDescription(doc.description),
-    doc.friendlyName || "",
-    doc.requestStatus || "",
-    getDepartment(doc) || "",
-    doc.createdAt || "",
-    doc.modifiedAt || "",
-    doc.decisionDate || "",
-  ];
+function cleanHTML(text) {
+  if (!text) return "";
+  return text.replace(/<[^>]*>/g, "").trim();
+}
+
+function getDepartment(doc) {
+  const field = doc.additionalInformation?.find(
+    f => f.additionalFieldName === "Department"
+  );
+  return field?.value;
+}
+
+function getRequester(doc, userMap) {
+  const event = doc.events?.find(e => e.eventType === "requesterSubmitted");
+  return userMap[event?.authorId] || event?.authorId || "";
+}
+
+function getComments(doc, userMap) {
+  return doc.events
+    ?.filter(e => e.eventType === "comment")
+    .map(e => `${userMap[e.authorId] || e.authorId}: ${cleanHTML(e.comment)}`)
+    .join(" | ");
 }
 
 // ==============================
-// 🔐 GRAPH TOKEN
+// GRAPH
 // ==============================
 async function getGraphToken() {
+  console.log("🔐 Getting Graph token...");
+
   const params = new URLSearchParams();
   params.append("client_id", process.env.MS_CLIENT_ID);
   params.append("client_secret", process.env.MS_CLIENT_SECRET);
@@ -173,108 +173,89 @@ async function getGraphToken() {
 }
 
 // ==============================
-// 📥 GET EXCEL ROWS
+// CLEAR EXCEL
 // ==============================
-async function getExcelRows(token) {
+async function clearExcel(token) {
+  console.log("🧹 Clearing Excel...");
+
   const url =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows`;
 
   const res = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}` }
   });
 
-  return res.data.value || [];
+  const rows = res.data.value;
+
+  console.log(`🗑️ Deleting ${rows.length} existing rows`);
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    await axios.delete(`${url}/${i}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  }
+
+  console.log("✅ Excel cleared");
 }
 
 // ==============================
-// 🔁 BUILD MAP
-// ==============================
-function buildMap(rows) {
-  const map = {};
-
-  rows.forEach((row) => {
-    const values = row.values[0];
-    map[values[0]] = values;
-  });
-
-  return map;
-}
-
-// ==============================
-// 🔄 PREPARE ROWS
-// ==============================
-function prepareRows(apiData, excelMap) {
-  const rowsToInsert = [];
-
-  apiData.forEach((doc) => {
-    const dept = getDepartment(doc);
-
-    if (dept !== "Sales & Pre-Sales") return;
-
-    const existing = excelMap[doc.requestId];
-    const newRow = formatRow(doc);
-
-    if (!existing) {
-      rowsToInsert.push(newRow);
-    } else if (existing[4] !== doc.requestStatus) {
-      rowsToInsert.push(newRow);
-    }
-  });
-
-  return rowsToInsert;
-}
-
-// ==============================
-// ➕ ADD ROWS
+// ADD ROWS
 // ==============================
 async function addRows(token, rows) {
-  if (rows.length === 0) {
-    console.log("No updates needed");
+  if (!rows.length) {
+    console.log("⚠️ No rows to insert");
     return;
   }
 
   const url =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows/add`;
 
-  await axios.post(
-    url,
-    { values: rows },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+  await axios.post(url, { values: rows }, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
     }
-  );
+  });
 
-  console.log(`✅ Added ${rows.length} rows`);
+  console.log(`✅ Inserted ${rows.length} rows`);
 }
 
 // ==============================
-// 🚀 MAIN
+// MAIN
 // ==============================
 async function main() {
   try {
-    console.log("Fetching approvals...");
-    const approvals = await fetchApprovals();
-    console.log("Total documents fetched:", docs.length);
-    console.log("Page:", page, "Fetched:", data.length);
-    console.log("Getting Graph token...");
-    const token = await getGraphToken();
+    console.log("🚀 Starting sync...");
 
-    console.log("Reading Excel...");
-    const excelRows = await getExcelRows(token);
+    const docs = await fetchAllDocuments();
 
-    const excelMap = buildMap(excelRows);
+    const stored = await getStoredTokens();
+    const userMap = await fetchUsers(stored.access_token);
 
-    console.log("Comparing...");
-    const rows = prepareRows(approvals, excelMap);
+    const salesDocs = docs.filter(d => getDepartment(d) === "Sales & Pre-Sales");
 
-    console.log("Rows to insert:", rows.length);
+    console.log(`📊 Sales & Pre-Sales records: ${salesDocs.length}`);
 
-    await addRows(token, rows);
+    const rows = salesDocs.map(doc => [
+      doc.requestId,
+      doc.documentName,
+      cleanHTML(doc.description),
+      doc.friendlyName,
+      doc.requestStatus,
+      getDepartment(doc),
+      getRequester(doc, userMap),
+      getComments(doc, userMap),
+      doc.createdAt,
+      doc.modifiedAt,
+      doc.decisionDate
+    ]);
 
-    console.log("✅ Sync complete");
+    const graphToken = await getGraphToken();
+
+    await clearExcel(graphToken);
+    await addRows(graphToken, rows);
+
+    console.log("✅ FULL SYNC COMPLETE");
 
   } catch (err) {
     console.error("❌ ERROR:", err.response?.data || err.message);
