@@ -257,7 +257,8 @@ async function main() {
   try {
     console.log("Fetching approvals...");
     const approvals = await fetchApprovals();
-
+    console.log("Total documents fetched:", docs.length);
+    console.log("Page:", page, "Fetched:", data.length);
     console.log("Getting Graph token...");
     const token = await getGraphToken();
 
