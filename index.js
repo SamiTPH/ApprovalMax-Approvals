@@ -3,7 +3,7 @@ const axios = require("axios");
 const { Pool } = require("pg");
 
 // ==============================
-// DB
+// DB CONNECTION
 // ==============================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -50,77 +50,76 @@ async function refreshToken() {
 }
 
 // ==============================
-// FETCH DOCUMENTS (DATE FILTER)
+// FETCH DOCUMENTS (CORRECT PAGINATION)
 // ==============================
-async function fetchDocuments() {
-  let token = (await getStoredTokens()).access_token;
+async function fetchAllDocuments(token) {
+  let allDocs = [];
+  let continuationToken = null;
 
-  try {
-    console.log("📅 Fetching last 90 days of documents...");
+  console.log("📄 Fetching documents...");
 
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - 90);
-
-    const res = await axios.get(
-      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents?createdFrom=${fromDate.toISOString()}`,
-      {
-        headers: { Authorization: `Bearer ${token}` }
-      }
+  do {
+    const url = new URL(
+      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents`
     );
 
-    const docs = res.data.payload || [];
+    url.searchParams.append("limit", "100");
 
-    console.log(`📄 Documents fetched: ${docs.length}`);
-
-    return docs;
-
-  } catch (err) {
-    if (err.response?.status === 401) {
-      console.log("⚠️ Token expired → refreshing...");
-      await refreshToken();
-      return fetchDocuments();
+    if (continuationToken) {
+      url.searchParams.append("continuationToken", continuationToken);
     }
 
-    throw err;
-  }
+    const res = await axios.get(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      }
+    });
+
+    const data = res.data;
+
+    const batch = data.items || [];
+    allDocs.push(...batch);
+
+    console.log(`📄 Batch fetched: ${batch.length}`);
+
+    continuationToken = data.continuationToken;
+
+  } while (continuationToken);
+
+  console.log(`✅ TOTAL DOCUMENTS: ${allDocs.length}`);
+
+  return allDocs;
 }
 
 // ==============================
-// FETCH USERS (WITH RETRY)
+// FETCH USERS (FIXED)
 // ==============================
-async function fetchUsers() {
-  let token = (await getStoredTokens()).access_token;
+async function fetchUsers(token) {
+  console.log("👤 Fetching users...");
 
-  try {
-    console.log("👤 Fetching users...");
-
-    const res = await axios.get(
-      `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/userProfiles`,
-      {
-        headers: { Authorization: `Bearer ${token}` }
+  const res = await axios.get(
+    `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/userProfiles`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
       }
-    );
-
-    const users = res.data.payload || [];
-
-    console.log(`👥 Users fetched: ${users.length}`);
-
-    const map = {};
-    users.forEach(u => {
-      map[u.userId] = `${u.firstName} ${u.lastName}`;
-    });
-
-    return map;
-
-  } catch (err) {
-    if (err.response?.status === 401) {
-      console.log("⚠️ Token expired (users) → refreshing...");
-      await refreshToken();
-      return fetchUsers();
     }
+  );
 
-    throw err;
-  }
+  // ✅ FIX: response is ARRAY, not items
+  const users = Array.isArray(res.data) ? res.data : [];
+
+  console.log(`👥 Users fetched: ${users.length}`);
+
+  const map = {};
+  users.forEach(u => {
+    map[u.userId] =
+      `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email;
+  });
+
+  return map;
 }
 
 // ==============================
@@ -153,8 +152,6 @@ function getComments(doc, userMap) {
 // GRAPH TOKEN
 // ==============================
 async function getGraphToken() {
-  console.log("🔐 Getting Graph token...");
-
   const params = new URLSearchParams();
   params.append("client_id", process.env.MS_CLIENT_ID);
   params.append("client_secret", process.env.MS_CLIENT_SECRET);
@@ -170,35 +167,61 @@ async function getGraphToken() {
 }
 
 // ==============================
-// CLEAR EXCEL (CORRECT METHOD)
+// RESET EXCEL (RECREATE TABLE)
 // ==============================
-async function clearExcel(token) {
-  console.log("🧹 Clearing Excel (range.clear)...");
+async function resetExcel(token) {
+  console.log("🧹 Resetting Excel...");
 
-  const url =
-    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/range/clear`;
+  const base =
+    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  await axios.post(url, {}, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    }
-  });
+  // Clear sheet
+  await axios.post(
+    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='A1:Z1000')/clear`,
+    {},
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
 
-  console.log("✅ Excel cleared");
+  // Add headers
+  const headers = [[
+    "requestId",
+    "documentName",
+    "description",
+    "workflow",
+    "status",
+    "department",
+    "requester",
+    "comments",
+    "createdAt",
+    "modifiedAt",
+    "decisionDate"
+  ]];
+
+  await axios.patch(
+    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='A1:K1')`,
+    { values: headers },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  // Create table
+  await axios.post(
+    `${base}:/workbook/tables/add`,
+    {
+      address: `${process.env.EXCEL_SHEET_NAME}!A1:K1`,
+      hasHeaders: true
+    },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  console.log("✅ Excel ready");
 }
 
 // ==============================
 // ADD ROWS
 // ==============================
 async function addRows(token, rows) {
-  if (!rows.length) {
-    console.log("⚠️ No rows to insert");
-    return;
-  }
-
   const url =
-    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables/${process.env.EXCEL_TABLE_NAME}/rows/add`;
+    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows/add`;
 
   await axios.post(url, { values: rows }, {
     headers: {
@@ -217,8 +240,19 @@ async function main() {
   try {
     console.log("🚀 Starting sync...");
 
-    const docs = await fetchDocuments();
-    const userMap = await fetchUsers();
+    let token = (await getStoredTokens()).access_token;
+
+    let docs;
+    try {
+      docs = await fetchAllDocuments(token);
+    } catch (err) {
+      if (err.response?.status === 401) {
+        token = await refreshToken();
+        docs = await fetchAllDocuments(token);
+      } else throw err;
+    }
+
+    const userMap = await fetchUsers(token);
 
     const salesDocs = docs.filter(
       d => getDepartment(d) === "Sales & Pre-Sales"
@@ -242,10 +276,10 @@ async function main() {
 
     const graphToken = await getGraphToken();
 
-    await clearExcel(graphToken);
+    await resetExcel(graphToken);
     await addRows(graphToken, rows);
 
-    console.log("✅ FULL SYNC COMPLETE");
+    console.log("✅ SYNC COMPLETE");
 
   } catch (err) {
     console.error("❌ ERROR:", err.response?.data || err.message);
