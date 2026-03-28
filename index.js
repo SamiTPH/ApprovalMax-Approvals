@@ -50,7 +50,7 @@ async function refreshToken() {
 }
 
 // ==============================
-// FETCH DOCUMENTS (FIXED)
+// FETCH DOCUMENTS
 // ==============================
 async function fetchAllDocuments(token) {
   let allDocs = [];
@@ -77,15 +77,12 @@ async function fetchAllDocuments(token) {
     });
 
     const data = res.data;
-
-    // ✅ FIX: use payload
     const batch = data.payload || [];
 
     console.log(`📄 Batch fetched: ${batch.length}`);
 
     allDocs.push(...batch);
 
-    // ✅ STOP condition
     if (!data.continuationToken) {
       console.log("🛑 No continuation token → done");
       break;
@@ -95,12 +92,11 @@ async function fetchAllDocuments(token) {
   }
 
   console.log(`✅ TOTAL DOCUMENTS: ${allDocs.length}`);
-
   return allDocs;
 }
 
 // ==============================
-// FETCH USERS (FIXED)
+// FETCH USERS
 // ==============================
 async function fetchUsers(token) {
   console.log("👤 Fetching users...");
@@ -115,7 +111,6 @@ async function fetchUsers(token) {
     }
   );
 
-  // ✅ FIX: response is ARRAY
   const users = Array.isArray(res.data) ? res.data : [];
 
   console.log(`👥 Users fetched: ${users.length}`);
@@ -176,29 +171,51 @@ async function getGraphToken() {
 }
 
 // ==============================
-// CLEAR TABLE ROWS ONLY (SAFE)
+// CLEAR TABLE ROWS (FINAL FIX)
 // ==============================
 async function clearTableRows(token) {
-  console.log("🧹 Clearing table rows...");
+  console.log("🧹 Clearing table rows (safe range)...");
 
   const base =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  const url = `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows`;
-
-  const res = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-
-  const rows = res.data.value;
-
-  console.log(`🗑️ Deleting ${rows.length} rows`);
-
-  for (let i = rows.length - 1; i >= 0; i--) {
-    await axios.delete(`${url}/${i}`, {
+  // Get table range
+  const tableRes = await axios.get(
+    `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/range`,
+    {
       headers: { Authorization: `Bearer ${token}` }
-    });
+    }
+  );
+
+  const address = tableRes.data.address;
+
+  // Example: Sheet1!A1:K50
+  const rangePart = address.split("!")[1];
+  const [start, end] = rangePart.split(":");
+
+  const startCol = start.match(/[A-Z]+/)[0];
+  const endCol = end.match(/[A-Z]+/)[0];
+  const endRow = parseInt(end.match(/\d+/)[0]);
+
+  if (endRow <= 1) {
+    console.log("⚠️ No rows to clear");
+    return;
   }
+
+  const clearRange = `${startCol}2:${endCol}${endRow}`;
+
+  console.log(`🧹 Clearing range: ${clearRange}`);
+
+  await axios.post(
+    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='${clearRange}')/clear`,
+    {},
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
 
   console.log("✅ Table rows cleared");
 }
@@ -278,7 +295,9 @@ async function main() {
   }
 }
 
-// ✅ IMPORTANT for Railway cron
+// ==============================
+// CRON SAFE EXIT
+// ==============================
 main()
   .then(() => process.exit(0))
   .catch(() => process.exit(1));
