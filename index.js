@@ -174,47 +174,39 @@ async function getGraphToken() {
 // CLEAR TABLE ROWS (FINAL FIX)
 // ==============================
 async function clearTableRows(token) {
-  console.log("🧹 Clearing table rows (safe range)...");
+  console.log("🧹 Deleting table data rows...");
 
   const base =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  // Get table range
-  const tableRes = await axios.get(
-    `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/range`,
-    {
-      headers: { Authorization: `Bearer ${token}` }
+  // dataBodyRange excludes the header row — avoids the off-by-one issue
+  let rangeRes;
+  try {
+    rangeRes = await axios.get(
+      `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/dataBodyRange`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+  } catch (err) {
+    // Graph returns 404/ItemNotFound when the table has no data rows yet
+    if (err.response?.status === 404 ||
+        err.response?.data?.error?.code === "ItemNotFound") {
+      console.log("⚠️ Table is already empty, nothing to delete");
+      return;
     }
-  );
-
-  const address = tableRes.data.address;
-  // address is like: "Sheet1!A1:K50" — extract both sheet name and range
-  let sheetName, rangePart;
-
-  if (address.includes("!")) {
-    [sheetName, rangePart] = address.split("!");
-  } else {
-    // Fallback if Graph returns no sheet prefix (edge case)
-    sheetName = process.env.EXCEL_SHEET_NAME;
-    rangePart = address;
+    throw err;
   }
 
-  const [start, end] = rangePart.split(":");
-  const startCol = start.match(/[A-Z]+/)[0];
-  const endCol   = end.match(/[A-Z]+/)[0];
-  const endRow   = parseInt(end.match(/\d+/)[0]);
+  const address = rangeRes.data.address; // e.g. "Sheet1!A2:I277"
+  const [sheetName, rangePart] = address.includes("!")
+    ? address.split("!")
+    : [process.env.EXCEL_SHEET_NAME, address];
 
-  if (endRow <= 1) {
-    console.log("⚠️ No rows to clear");
-    return;
-  }
+  console.log(`🗑️ Deleting rows: ${rangePart} on sheet: "${sheetName}"`);
 
-  const clearRange = `${startCol}2:${endCol}${endRow}`;
-  console.log(`🧹 Clearing range: ${clearRange} on sheet: "${sheetName}"`);
-
+  // "delete" with shift Up physically removes the rows from the sheet/table
   await axios.post(
-    `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${clearRange}')/clear`,
-    { applyTo: "Contents" },   // ← required by Graph API
+    `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${rangePart}')/delete`,
+    { shift: "Up" },
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -223,9 +215,8 @@ async function clearTableRows(token) {
     }
   );
 
-  console.log("✅ Table rows cleared");
+  console.log("✅ Table rows deleted");
 }
-
 // ==============================
 // ADD ROWS
 // ==============================
