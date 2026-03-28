@@ -3,7 +3,7 @@ const axios = require("axios");
 const { Pool } = require("pg");
 
 // ==============================
-// DB CONNECTION
+// DB
 // ==============================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -50,7 +50,7 @@ async function refreshToken() {
 }
 
 // ==============================
-// FETCH DOCUMENTS (CORRECT PAGINATION)
+// FETCH DOCUMENTS (FIXED)
 // ==============================
 async function fetchAllDocuments(token) {
   let allDocs = [];
@@ -58,7 +58,7 @@ async function fetchAllDocuments(token) {
 
   console.log("📄 Fetching documents...");
 
-  do {
+  while (true) {
     const url = new URL(
       `https://public-api.approvalmax.com/api/v1/companies/${process.env.COMPANY_ID}/standalone/documents`
     );
@@ -78,14 +78,21 @@ async function fetchAllDocuments(token) {
 
     const data = res.data;
 
-    const batch = data.items || [];
-    allDocs.push(...batch);
+    // ✅ FIX: use payload
+    const batch = data.payload || [];
 
     console.log(`📄 Batch fetched: ${batch.length}`);
 
-    continuationToken = data.continuationToken;
+    allDocs.push(...batch);
 
-  } while (continuationToken);
+    // ✅ STOP condition
+    if (!data.continuationToken) {
+      console.log("🛑 No continuation token → done");
+      break;
+    }
+
+    continuationToken = data.continuationToken;
+  }
 
   console.log(`✅ TOTAL DOCUMENTS: ${allDocs.length}`);
 
@@ -108,7 +115,7 @@ async function fetchUsers(token) {
     }
   );
 
-  // ✅ FIX: response is ARRAY, not items
+  // ✅ FIX: response is ARRAY
   const users = Array.isArray(res.data) ? res.data : [];
 
   console.log(`👥 Users fetched: ${users.length}`);
@@ -152,6 +159,8 @@ function getComments(doc, userMap) {
 // GRAPH TOKEN
 // ==============================
 async function getGraphToken() {
+  console.log("🔐 Getting Graph token...");
+
   const params = new URLSearchParams();
   params.append("client_id", process.env.MS_CLIENT_ID);
   params.append("client_secret", process.env.MS_CLIENT_SECRET);
@@ -167,59 +176,42 @@ async function getGraphToken() {
 }
 
 // ==============================
-// RESET EXCEL (RECREATE TABLE)
+// CLEAR TABLE ROWS ONLY (SAFE)
 // ==============================
-async function resetExcel(token) {
-  console.log("🧹 Resetting Excel...");
+async function clearTableRows(token) {
+  console.log("🧹 Clearing table rows...");
 
   const base =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  // Clear sheet
-  await axios.post(
-    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='A1:Z1000')/clear`,
-    {},
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
+  const url = `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows`;
 
-  // Add headers
-  const headers = [[
-    "requestId",
-    "documentName",
-    "description",
-    "workflow",
-    "status",
-    "department",
-    "requester",
-    "comments",
-    "createdAt",
-    "modifiedAt",
-    "decisionDate"
-  ]];
+  const res = await axios.get(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
 
-  await axios.patch(
-    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='A1:K1')`,
-    { values: headers },
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
+  const rows = res.data.value;
 
-  // Create table
-  await axios.post(
-    `${base}:/workbook/tables/add`,
-    {
-      address: `${process.env.EXCEL_SHEET_NAME}!A1:K1`,
-      hasHeaders: true
-    },
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
+  console.log(`🗑️ Deleting ${rows.length} rows`);
 
-  console.log("✅ Excel ready");
+  for (let i = rows.length - 1; i >= 0; i--) {
+    await axios.delete(`${url}/${i}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  }
+
+  console.log("✅ Table rows cleared");
 }
 
 // ==============================
 // ADD ROWS
 // ==============================
 async function addRows(token, rows) {
+  if (!rows.length) {
+    console.log("⚠️ No rows to insert");
+    return;
+  }
+
   const url =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows/add`;
 
@@ -276,7 +268,7 @@ async function main() {
 
     const graphToken = await getGraphToken();
 
-    await resetExcel(graphToken);
+    await clearTableRows(graphToken);
     await addRows(graphToken, rows);
 
     console.log("✅ SYNC COMPLETE");
@@ -286,4 +278,7 @@ async function main() {
   }
 }
 
-main();
+// ✅ IMPORTANT for Railway cron
+main()
+  .then(() => process.exit(0))
+  .catch(() => process.exit(1));
