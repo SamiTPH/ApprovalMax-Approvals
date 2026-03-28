@@ -188,14 +188,21 @@ async function clearTableRows(token) {
   );
 
   const address = tableRes.data.address;
+  // address is like: "Sheet1!A1:K50" — extract both sheet name and range
+  let sheetName, rangePart;
 
-  // Example: Sheet1!A1:K50
-  const rangePart = address.split("!")[1];
+  if (address.includes("!")) {
+    [sheetName, rangePart] = address.split("!");
+  } else {
+    // Fallback if Graph returns no sheet prefix (edge case)
+    sheetName = process.env.EXCEL_SHEET_NAME;
+    rangePart = address;
+  }
+
   const [start, end] = rangePart.split(":");
-
   const startCol = start.match(/[A-Z]+/)[0];
-  const endCol = end.match(/[A-Z]+/)[0];
-  const endRow = parseInt(end.match(/\d+/)[0]);
+  const endCol   = end.match(/[A-Z]+/)[0];
+  const endRow   = parseInt(end.match(/\d+/)[0]);
 
   if (endRow <= 1) {
     console.log("⚠️ No rows to clear");
@@ -203,12 +210,11 @@ async function clearTableRows(token) {
   }
 
   const clearRange = `${startCol}2:${endCol}${endRow}`;
-
-  console.log(`🧹 Clearing range: ${clearRange}`);
+  console.log(`🧹 Clearing range: ${clearRange} on sheet: "${sheetName}"`);
 
   await axios.post(
-    `${base}:/workbook/worksheets('${process.env.EXCEL_SHEET_NAME}')/range(address='${clearRange}')/clear`,
-    {},
+    `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${clearRange}')/clear`,
+    { applyTo: "Contents" },   // ← required by Graph API
     {
       headers: {
         Authorization: `Bearer ${token}`,
