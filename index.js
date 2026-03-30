@@ -177,7 +177,6 @@ async function clearTableRows(token) {
   const base =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  // Get current row count from dataBodyRange
   let rangeRes;
   try {
     rangeRes = await axios.get(
@@ -195,16 +194,23 @@ async function clearTableRows(token) {
     throw err;
   }
 
-  const rowCount = rangeRes.data.rowCount;
-  console.log(`🗑️ Deleting ${rowCount} table rows...`);
+  const address = rangeRes.data.address;
+  const [sheetName, rangePart] = address.includes("!")
+    ? address.split("!")
+    : [process.env.EXCEL_SHEET_NAME, address];
 
-  // Delete from bottom to top via the table rows API (avoids worksheet conflict)
-  for (let i = rowCount - 1; i >= 0; i--) {
-    await axios.delete(
-      `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows/itemAt(index=${i})`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-  }
+  console.log(`🗑️ Deleting rows: ${rangePart} on sheet: "${sheetName}"`);
+
+  await axios.post(
+    `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${rangePart}')/delete`,
+    { shift: "Up" },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
 
   console.log("✅ Table rows deleted");
 }
