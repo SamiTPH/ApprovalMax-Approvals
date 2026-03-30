@@ -261,7 +261,9 @@ async function main() {
     // UPDATE 6: Filter by "Refund Request" workflow only
     // (replaces the department filter — all refund requests are Sales & Pre-Sales)
     const refundDocs = docs.filter(d =>
-      d.friendlyName?.startsWith("Refund Request")
+      d.friendlyName?.startsWith("Refund Request") &&
+      d.documentName?.trim() &&
+      cleanHTML(d.description)?.trim()
     );
 
     console.log(`📊 Refund Request records: ${refundDocs.length}`);
