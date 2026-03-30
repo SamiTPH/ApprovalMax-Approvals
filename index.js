@@ -28,7 +28,6 @@ async function saveTokens(access_token, refresh_token) {
 
 async function refreshToken() {
   const stored = await getStoredTokens();
-
   const params = new URLSearchParams();
   params.append("grant_type", "refresh_token");
   params.append("refresh_token", stored.refresh_token);
@@ -41,11 +40,8 @@ async function refreshToken() {
   );
 
   const { access_token, refresh_token } = res.data;
-
   console.log("🔄 Token refreshed");
-
   await saveTokens(access_token, refresh_token);
-
   return access_token;
 }
 
@@ -64,7 +60,6 @@ async function fetchAllDocuments(token) {
     );
 
     url.searchParams.append("limit", "100");
-
     if (continuationToken) {
       url.searchParams.append("continuationToken", continuationToken);
     }
@@ -78,9 +73,7 @@ async function fetchAllDocuments(token) {
 
     const data = res.data;
     const batch = data.payload || [];
-
     console.log(`📄 Batch fetched: ${batch.length}`);
-
     allDocs.push(...batch);
 
     if (!data.continuationToken) {
@@ -112,7 +105,6 @@ async function fetchUsers(token) {
   );
 
   const users = Array.isArray(res.data) ? res.data : [];
-
   console.log(`👥 Users fetched: ${users.length}`);
 
   const map = {};
@@ -132,12 +124,6 @@ function cleanHTML(text) {
   return text.replace(/<[^>]*>/g, "").trim();
 }
 
-function getDepartment(doc) {
-  return doc.additionalInformation?.find(
-    f => f.additionalFieldName === "Department"
-  )?.value;
-}
-
 function getRequester(doc, userMap) {
   const event = doc.events?.find(e => e.eventType === "requesterSubmitted");
   return userMap[event?.authorId] || event?.authorId || "";
@@ -148,6 +134,18 @@ function getComments(doc, userMap) {
     ?.filter(e => e.eventType === "comment")
     .map(e => `${userMap[e.authorId] || e.authorId}: ${cleanHTML(e.comment)}`)
     .join(" | ");
+}
+
+// UPDATE 3: Format ISO timestamps to "2026-02-25, 7:44pm"
+function formatDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const date = d.toISOString().split("T")[0];
+  let hours = d.getUTCHours();
+  const minutes = d.getUTCMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "pm" : "am";
+  hours = hours % 12 || 12;
+  return `${date}, ${hours}:${minutes}${ampm}`;
 }
 
 // ==============================
@@ -171,7 +169,7 @@ async function getGraphToken() {
 }
 
 // ==============================
-// CLEAR TABLE ROWS (FINAL FIX)
+// CLEAR TABLE ROWS
 // ==============================
 async function clearTableRows(token) {
   console.log("🧹 Deleting table data rows...");
@@ -179,7 +177,6 @@ async function clearTableRows(token) {
   const base =
     `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
 
-  // dataBodyRange excludes the header row — avoids the off-by-one issue
   let rangeRes;
   try {
     rangeRes = await axios.get(
@@ -187,23 +184,23 @@ async function clearTableRows(token) {
       { headers: { Authorization: `Bearer ${token}` } }
     );
   } catch (err) {
-    // Graph returns 404/ItemNotFound when the table has no data rows yet
-    if (err.response?.status === 404 ||
-        err.response?.data?.error?.code === "ItemNotFound") {
+    if (
+      err.response?.status === 404 ||
+      err.response?.data?.error?.code === "ItemNotFound"
+    ) {
       console.log("⚠️ Table is already empty, nothing to delete");
       return;
     }
     throw err;
   }
 
-  const address = rangeRes.data.address; // e.g. "Sheet1!A2:I277"
+  const address = rangeRes.data.address;
   const [sheetName, rangePart] = address.includes("!")
     ? address.split("!")
     : [process.env.EXCEL_SHEET_NAME, address];
 
   console.log(`🗑️ Deleting rows: ${rangePart} on sheet: "${sheetName}"`);
 
-  // "delete" with shift Up physically removes the rows from the sheet/table
   await axios.post(
     `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${rangePart}')/delete`,
     { shift: "Up" },
@@ -217,6 +214,7 @@ async function clearTableRows(token) {
 
   console.log("✅ Table rows deleted");
 }
+
 // ==============================
 // ADD ROWS
 // ==============================
@@ -260,28 +258,28 @@ async function main() {
 
     const userMap = await fetchUsers(token);
 
-    const salesDocs = docs.filter(
-      d => getDepartment(d) === "Sales & Pre-Sales"
+    // UPDATE 6: Filter by "Refund Request" workflow only
+    // (replaces the department filter — all refund requests are Sales & Pre-Sales)
+    const refundDocs = docs.filter(d =>
+      d.friendlyName?.startsWith("Refund Request")
     );
 
-    console.log(`📊 Sales records: ${salesDocs.length}`);
+    console.log(`📊 Refund Request records: ${refundDocs.length}`);
 
-    const rows = salesDocs.map(doc => [
-      doc.requestId,
-      doc.documentName,
+    // Columns: Request ID | Document Name | Description | Status |
+    //          Requester | Comments | Created At | Decision Date
+    const rows = refundDocs.map(doc => [
+      doc.requestId,                          // UPDATE 4: department removed
+      doc.documentName,                       // UPDATE 5: friendlyName/workflow removed
       cleanHTML(doc.description),
-      doc.friendlyName,
       doc.requestStatus,
-      getDepartment(doc),
       getRequester(doc, userMap),
       getComments(doc, userMap),
-      doc.createdAt,
-      doc.modifiedAt,
-      doc.decisionDate
+      formatDate(doc.createdAt),              // UPDATE 3: formatted
+      formatDate(doc.decisionDate)            // UPDATE 2: modifiedAt removed, UPDATE 3: formatted
     ]);
 
     const graphToken = await getGraphToken();
-
     await clearTableRows(graphToken);
     await addRows(graphToken, rows);
 
