@@ -148,6 +148,21 @@ function formatDate(iso) {
   return `${date}, ${hours}:${minutes}${ampm}`;
 }
 
+function graphHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json"
+  };
+}
+
+function workbookBaseUrl() {
+  return `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook`;
+}
+
+function workbookTableUrl() {
+  return `${workbookBaseUrl()}/tables/${encodeURIComponent(process.env.EXCEL_TABLE_NAME)}`;
+}
+
 // ==============================
 // GRAPH TOKEN
 // ==============================
@@ -169,72 +184,79 @@ async function getGraphToken() {
 }
 
 // ==============================
-// CLEAR TABLE ROWS
+// GET TABLE ROW COUNT
 // ==============================
 async function clearTableRows(token) {
-  console.log("🧹 Deleting table data rows...");
+  console.log("🧹 Checking table data rows...");
 
-  const base =
-    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}`;
+  const tableUrl = workbookTableUrl();
+
+  await axios.get(tableUrl, { headers: graphHeaders(token) });
 
   let rangeRes;
   try {
     rangeRes = await axios.get(
-      `${base}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/dataBodyRange`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      `${tableUrl}/dataBodyRange`,
+      { headers: graphHeaders(token) }
     );
   } catch (err) {
     if (
       err.response?.status === 404 ||
       err.response?.data?.error?.code === "ItemNotFound"
     ) {
-      console.log("⚠️ Table is already empty, nothing to delete");
-      return;
+      console.log("⚠️ Table is already empty, nothing to update");
+      return 0;
     }
     throw err;
   }
 
-  const address = rangeRes.data.address;
-  const [sheetName, rangePart] = address.includes("!")
-    ? address.split("!")
-    : [process.env.EXCEL_SHEET_NAME, address];
-
-  console.log(`🗑️ Deleting rows: ${rangePart} on sheet: "${sheetName}"`);
-
-  await axios.post(
-    `${base}:/workbook/worksheets('${encodeURIComponent(sheetName)}')/range(address='${rangePart}')/delete`,
-    { shift: "Up" },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-
-  console.log("✅ Table rows deleted");
+  const rowCount = rangeRes.data.rowCount || rangeRes.data.values?.length || 0;
+  console.log(`Found ${rowCount} existing table rows`);
+  return rowCount;
 }
 
 // ==============================
 // ADD ROWS
 // ==============================
-async function addRows(token, rows) {
-  if (!rows.length) {
+async function addRows(token, rows, existingRowCount = 0) {
+  if (!rows.length && !existingRowCount) {
     console.log("⚠️ No rows to insert");
     return;
   }
 
-  const url =
-    `https://graph.microsoft.com/v1.0/users/${process.env.EXCEL_USER}/drive/root:${process.env.EXCEL_FILE_PATH}:/workbook/tables('${process.env.EXCEL_TABLE_NAME}')/rows/add`;
+  const tableUrl = workbookTableUrl();
+  const columnCount = rows[0]?.length || 8;
 
-  await axios.post(url, { values: rows }, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
+  if (existingRowCount) {
+    const rowsToWrite = [];
+
+    for (let i = 0; i < existingRowCount; i++) {
+      rowsToWrite.push(rows[i] || Array(columnCount).fill(""));
     }
-  });
 
-  console.log(`✅ Inserted ${rows.length} rows`);
+    await axios.patch(
+      `${tableUrl}/dataBodyRange`,
+      { values: rowsToWrite },
+      { headers: graphHeaders(token) }
+    );
+
+    console.log(`Updated ${rowsToWrite.length} existing rows`);
+  }
+
+  const rowsToAdd = rows.slice(existingRowCount);
+
+  if (!rowsToAdd.length) {
+    console.log(`Wrote ${rows.length} rows`);
+    return;
+  }
+
+  await axios.post(
+    `${tableUrl}/rows/add`,
+    { values: rowsToAdd },
+    { headers: graphHeaders(token) }
+  );
+
+  console.log(`✅ Inserted ${rowsToAdd.length} rows`);
 }
 
 // ==============================
@@ -282,8 +304,8 @@ async function main() {
     ]);
 
     const graphToken = await getGraphToken();
-    await clearTableRows(graphToken);
-    await addRows(graphToken, rows);
+    const existingRowCount = await clearTableRows(graphToken);
+    await addRows(graphToken, rows, existingRowCount);
 
     console.log("✅ SYNC COMPLETE");
 
